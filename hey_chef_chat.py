@@ -1,0 +1,1570 @@
+import streamlit as st
+from groq import Groq
+import re
+from datetime import datetime, timedelta
+import speech_recognition as sr
+from gtts import gTTS
+import io
+from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
+import requests
+from urllib.parse import urlparse, parse_qs
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+import threading
+import time
+import queue
+import base64
+from openai import OpenAI
+import random
+
+# ================= CONFIG =================
+GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
+OPENROUTER_API_KEY = st.secrets["OPENROUTER_API_KEY"]
+YOUTUBE_API_KEY = st.secrets["YOUTUBE_API_KEY"]
+# ================= SESSION STATE =================
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "grocery_list" not in st.session_state:
+    st.session_state.grocery_list = set()
+if "inventory" not in st.session_state:
+    st.session_state.inventory = {
+        "salt": 500, "chilli powder": 200, "turmeric": 150,
+        "rice": 2000, "oil": 1000, "onion": 10, "tomato": 8,
+        "paneer": 500, "potato": 2000, "milk": 1000, "garlic": 200, "ginger": 150
+    }
+if "inventory_prices" not in st.session_state:
+    st.session_state.inventory_prices = {}
+if "inventory_expiry" not in st.session_state:
+    st.session_state.inventory_expiry = {}
+if "meal_plan" not in st.session_state:
+    st.session_state.meal_plan = {}
+if "allergies" not in st.session_state:
+    st.session_state.allergies = ""
+if "custom_recipes" not in st.session_state:
+    st.session_state.custom_recipes = {}
+if "show_cooking_check" not in st.session_state:
+    st.session_state.show_cooking_check = False
+if "show_nutrition" not in st.session_state:
+    st.session_state.show_nutrition = False
+if "show_substitutes" not in st.session_state:
+    st.session_state.show_substitutes = False
+if "last_recipe" not in st.session_state:
+    st.session_state.last_recipe = ""
+if "pure_veg_mode" not in st.session_state:
+    st.session_state.pure_veg_mode = False
+if "health_mode" not in st.session_state:
+    st.session_state.health_mode = False
+if "language_mode" not in st.session_state:
+    st.session_state.language_mode = "Hinglish"
+if "tried_recipes" not in st.session_state:
+    st.session_state.tried_recipes = []
+if "favourite_recipes" not in st.session_state:
+    st.session_state.favourite_recipes = {}
+if "unit_system" not in st.session_state:
+    st.session_state.unit_system = "metric"
+if "servings" not in st.session_state:
+    st.session_state.servings = 1
+if "voice_enabled" not in st.session_state:
+    st.session_state.voice_enabled = False
+if "voice_language" not in st.session_state:
+    st.session_state.voice_language = "English"
+if "cooking_mode" not in st.session_state:
+    st.session_state.cooking_mode = False
+if "current_step" not in st.session_state:
+    st.session_state.current_step = 0
+if "cooking_steps" not in st.session_state:
+    st.session_state.cooking_steps = []
+if "ingredients_shown" not in st.session_state:
+    st.session_state.ingredients_shown = False
+if "missing_ingredients" not in st.session_state:
+    st.session_state.missing_ingredients = []
+if "processing_video" not in st.session_state:
+    st.session_state.processing_video = False
+if "video_recipe" not in st.session_state:
+    st.session_state.video_recipe = ""
+if "listening_active" not in st.session_state:
+    st.session_state.listening_active = False
+if "listening_status" not in st.session_state:
+    st.session_state.listening_status = "idle"  # idle, listening, recording, processing
+if "wake_word_detected" not in st.session_state:
+    st.session_state.wake_word_detected = False
+if "voice_command_queue" not in st.session_state:
+    st.session_state.voice_command_queue = queue.Queue()
+if "listening_thread" not in st.session_state:
+    st.session_state.listening_thread = None
+
+# ================= VOICE HELPERS =================
+def listen_for_wake_word_chunk():
+    """Listen for a short audio chunk and check for wake word"""
+    recognizer = sr.Recognizer()
+    recognizer.energy_threshold = 4000  # Adjust for sensitivity
+    recognizer.dynamic_energy_threshold = True
+    
+    try:
+        with sr.Microphone() as source:
+            # Adjust for ambient noise
+            recognizer.adjust_for_ambient_noise(source, duration=0.5)
+            # Listen for 3 seconds
+            audio = recognizer.listen(source, timeout=3, phrase_time_limit=3)
+            
+            # Transcribe
+            text = recognizer.recognize_google(audio).lower()
+            
+            # Check for wake word variants
+            wake_words = ["hey chef", "hey chief", "a chef", "hey chefs"]
+            if any(wake_word in text for wake_word in wake_words):
+                return True, text
+            return False, text
+            
+    except sr.WaitTimeoutError:
+        return False, ""
+    except sr.UnknownValueError:
+        return False, ""
+    except sr.RequestError:
+        return False, ""
+    except Exception as e:
+        return False, ""
+
+def record_voice_command():
+    """Record full voice command after wake word detected"""
+    recognizer = sr.Recognizer()
+    
+    try:
+        with sr.Microphone() as source:
+            recognizer.adjust_for_ambient_noise(source, duration=0.3)
+            # Listen for command (up to 8 seconds)
+            audio = recognizer.listen(source, timeout=2, phrase_time_limit=8)
+            text = recognizer.recognize_google(audio)
+            return text
+    except Exception as e:
+        return None
+
+def continuous_listening_loop():
+    """Background thread for continuous listening"""
+    while st.session_state.listening_active:
+        try:
+            if st.session_state.listening_status == "listening":
+                # Listen for wake word
+                wake_detected, heard_text = listen_for_wake_word_chunk()
+                
+                if wake_detected:
+                    st.session_state.listening_status = "recording"
+                    st.session_state.wake_word_detected = True
+                    
+                    # Small pause
+                    time.sleep(0.5)
+                    
+                    # Record command
+                    command = record_voice_command()
+                    
+                    if command:
+                        st.session_state.voice_command_queue.put(command)
+                        st.session_state.listening_status = "processing"
+                    else:
+                        # No command received, go back to listening
+                        st.session_state.listening_status = "listening"
+                        st.session_state.wake_word_detected = False
+            
+            time.sleep(0.1)  # Small delay to prevent CPU overload
+            
+        except Exception as e:
+            st.session_state.listening_status = "error"
+            break
+    
+    # Cleanup when stopped
+    st.session_state.listening_status = "idle"
+
+def start_continuous_listening():
+    """Start the continuous listening mode"""
+    if not st.session_state.listening_active:
+        st.session_state.listening_active = True
+        st.session_state.listening_status = "listening"
+        
+        # Start listening thread
+        thread = threading.Thread(target=continuous_listening_loop, daemon=True)
+        thread.start()
+        st.session_state.listening_thread = thread
+
+def stop_continuous_listening():
+    """Stop the continuous listening mode"""
+    st.session_state.listening_active = False
+    st.session_state.listening_status = "idle"
+    st.session_state.wake_word_detected = False
+
+    # ================= NEW: IMAGE DETECTION HELPER =================
+def detect_ingredients_from_image(image_bytes):
+    try:
+        base64_image = base64.b64encode(image_bytes).decode('utf-8')
+        response = openrouter_client.chat.completions.create( 
+            model="google/gemini-flash-1.5-8b",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "List all visible food ingredients in this image. One item per line. Use simple English names."},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+                    ]
+                }
+            ],
+            max_tokens=200
+        )
+        text = response.choices[0].message.content.strip()
+        items = [line.strip().lower() for line in text.split("\n") if line.strip()]
+        return items
+    except Exception as e:
+        st.error(f"Detection error: {str(e)}")
+        return []
+def get_expiry_estimate(item_name):
+    """Simple estimate for expiry in days"""
+    item = item_name.lower()
+    if any(x in item for x in ["tomato", "onion", "cucumber", "spinach", "coriander", "curry leaves"]):
+        return random.randint(3, 7)   # fresh veggies
+    elif any(x in item for x in ["potato", "carrot", "beetroot", "pumpkin"]):
+        return random.randint(10, 20) # root veggies
+    elif "milk" in item or "curd" in item:
+        return random.randint(2, 5)
+    elif "paneer" in item:
+        return random.randint(3, 6)
+    elif any(x in item for x in ["rice", "dal", "flour", "oil", "spices"]):
+        return random.randint(180, 365) # long shelf
+    else:
+        return random.randint(7, 30)  # default
+def detect_youtube_url(text):
+    """Detect YouTube URLs in text and extract video ID"""
+    patterns = [
+        r'(?:https?://)?(?:www\.)?youtube\.com/watch\?v=([a-zA-Z0-9_-]{11})',
+        r'(?:https?://)?(?:www\.)?youtube\.com/shorts/([a-zA-Z0-9_-]{11})',
+        r'(?:https?://)?youtu\.be/([a-zA-Z0-9_-]{11})',
+        r'(?:https?://)?(?:m\.)?youtube\.com/watch\?v=([a-zA-Z0-9_-]{11})',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return match.group(1)
+    return None
+
+def extract_youtube_transcript(video_id):
+    """Extract transcript from YouTube video"""
+    try:
+        # Try to get transcript in English first, then Hindi
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        
+        try:
+            transcript = transcript_list.find_transcript(['en', 'en-US', 'en-GB'])
+        except:
+            try:
+                transcript = transcript_list.find_transcript(['hi', 'hi-IN'])
+            except:
+                # Get any available transcript
+                transcript = transcript_list.find_generated_transcript(['en', 'hi'])
+        
+        # Fetch and combine all text
+        transcript_data = transcript.fetch()
+        full_text = " ".join([entry['text'] for entry in transcript_data])
+        return full_text
+    
+    except TranscriptsDisabled:
+        return None
+    except NoTranscriptFound:
+        return None
+    except Exception as e:
+        return None
+
+def get_video_title(video_id):
+    """Get YouTube video title using oEmbed API"""
+    try:
+        url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json"
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            return data.get('title', 'Unknown Video')
+    except:
+        pass
+    return 'Unknown Video'
+
+def get_video_description(video_id):
+    """Get YouTube video description using YouTube Data API v3"""
+    if not YOUTUBE_API_KEY:
+        return None, "⚠️ YouTube API key not configured. Please add your API key in the code."
+    
+    try:
+        youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
+        
+        request = youtube.videos().list(
+            part='snippet',
+            id=video_id
+        )
+        response = request.execute()
+        
+        if response['items']:
+            snippet = response['items'][0]['snippet']
+            title = snippet.get('title', 'Unknown Video')
+            description = snippet.get('description', '')
+            return {
+                'title': title,
+                'description': description
+            }, None
+        else:
+            return None, "Video not found"
+            
+    except HttpError as e:
+        return None, f"API Error: {str(e)}"
+    except Exception as e:
+        return None, f"Error: {str(e)}"
+
+def extract_recipe_links(description):
+    """Extract URLs from video description"""
+    url_pattern = r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
+    urls = re.findall(url_pattern, description)
+    
+    # Filter out common non-recipe URLs
+    recipe_urls = []
+    exclude_patterns = ['instagram.com', 'facebook.com', 'twitter.com', 'youtube.com', 'youtu.be']
+    
+    for url in urls:
+        if not any(pattern in url.lower() for pattern in exclude_patterns):
+            recipe_urls.append(url)
+    
+    return recipe_urls
+
+def scrape_recipe_from_url(url):
+    """Scrape recipe content from external URL"""
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            # Simple text extraction (you can enhance this with BeautifulSoup for better parsing)
+            text = response.text
+            # Remove HTML tags for basic parsing
+            text = re.sub(r'<[^>]+>', ' ', text)
+            text = re.sub(r'\s+', ' ', text).strip()
+            return text[:5000]  # Limit to first 5000 chars
+        return None
+    except Exception as e:
+        return None
+
+def parse_recipe_from_transcript(transcript_text, video_title=""):
+    """Use AI to extract recipe from transcript"""
+    prompt = f"""
+You are a recipe extractor. Below is a transcript from a cooking video titled "{video_title}".
+
+Extract the recipe in this format:
+
+**Recipe: [Dish Name]**
+
+**Ingredients:**
+- ingredient 1 with quantity
+- ingredient 2 with quantity
+(list all mentioned)
+
+**Steps:**
+1. Step one
+2. Step two
+(numbered steps)
+
+Transcript:
+{transcript_text[:3000]}
+
+Be concise and practical. If ingredients aren't clearly mentioned, make reasonable estimates based on the cooking steps described.
+"""
+    
+    try:
+        response = client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="llama-3.3-70b-versatile",
+            temperature=0.5,
+            max_tokens=800,
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"Error parsing recipe: {str(e)}"
+
+def parse_recipe_from_description(description_text, scraped_content="", video_title=""):
+    """Use AI to extract recipe from description + scraped content"""
+    combined_text = f"Video Title: {video_title}\n\nDescription:\n{description_text}\n\n"
+    
+    if scraped_content:
+        combined_text += f"Recipe Page Content:\n{scraped_content}"
+    
+    prompt = f"""
+You are a recipe extractor. Extract the complete recipe with exact measurements.
+
+{combined_text[:4000]}
+
+Format the recipe as:
+
+**Recipe: [Dish Name]**
+
+**Ingredients:**
+- ingredient 1 with EXACT quantity (e.g., 2 cups, 500g)
+- ingredient 2 with EXACT quantity
+(list ALL ingredients with measurements)
+
+**Steps:**
+1. Detailed step one
+2. Detailed step two
+(numbered steps)
+
+IMPORTANT: Extract EXACT quantities. Don't estimate - use the measurements provided.
+"""
+    
+    try:
+        response = client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="llama-3.3-70b-versatile",
+            temperature=0.3,
+            max_tokens=1000,
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"Error parsing recipe: {str(e)}"
+
+def transcribe_audio(audio_bytes):
+    """Convert speech to text using Google Speech Recognition"""
+    try:
+        recognizer = sr.Recognizer()
+        audio = sr.AudioData(audio_bytes, 16000, 2)
+        text = recognizer.recognize_google(audio)
+        return text
+    except sr.UnknownValueError:
+        return None
+    except sr.RequestError:
+        return None
+    except Exception as e:
+        st.error(f"Transcription error: {str(e)}")
+        return None
+
+def text_to_speech(text):
+    lang = "mr" if st.session_state.voice_language == "Marathi" else \
+           "hi" if st.session_state.voice_language == "Hindi" else "en"
+    try:
+        tts = gTTS(text=text, lang=lang, slow=False)
+        fp = io.BytesIO()
+        tts.write_to_fp(fp)
+        fp.seek(0)
+        return fp
+    except Exception as e:
+        st.error(f"TTS error: {str(e)}")
+        return None
+
+# ================= HELPERS =================
+def get_quantity_status(qty):
+    if qty >= 500:
+        return "High", "green"
+    elif qty >= 200:
+        return "Medium", "orange"
+    else:
+        return "Low", "red"
+
+UNIT_CONVERSIONS = {
+    "g": {"imperial": ("oz", 0.035274), "metric": ("g", 1.0)},
+    "kg": {"imperial": ("lbs", 2.20462), "metric": ("kg", 1.0)},
+    "gram": {"imperial": ("oz", 0.035274), "metric": ("g", 1.0)},
+    "grams": {"imperial": ("oz", 0.035274), "metric": ("g", 1.0)},
+    "ml": {"imperial": ("fl oz", 0.033814), "metric": ("ml", 1.0)},
+    "l": {"imperial": ("cups", 4.22675), "metric": ("l", 1.0)},
+    "pcs": {"imperial": ("pcs", 1.0), "metric": ("pcs", 1.0)},
+    "piece": {"imperial": ("piece", 1.0), "metric": ("piece", 1.0)},
+    "pieces": {"imperial": ("pieces", 1.0), "metric": ("pieces", 1.0)},
+    "cup": {"imperial": ("cup", 1.0), "metric": ("cup", 1.0)},
+    "cups": {"imperial": ("cups", 1.0), "metric": ("cups", 1.0)},
+}
+
+def convert_quantity(qty_str, target_system="metric"):
+    if qty_str in ["as needed", "to taste", "a pinch"]:
+        return qty_str
+    try:
+        parts = qty_str.split(maxsplit=1)
+        num = float(parts[0])
+        unit = parts[1].lower() if len(parts) > 1 else ""
+        base_unit = unit.rstrip('s')
+        if base_unit not in UNIT_CONVERSIONS:
+            return qty_str
+        conv = UNIT_CONVERSIONS[base_unit][target_system]
+        new_unit, factor = conv
+        new_num = round(num * factor, 2) if factor != 1.0 else num
+        return f"{new_num} {new_unit}"
+    except:
+        return qty_str
+
+def scale_quantity(qty_str, servings=1):
+    if servings <= 1:
+        return qty_str
+    try:
+        parts = qty_str.split(maxsplit=1)
+        num = float(parts[0])
+        rest = " " + parts[1] if len(parts) > 1 else ""
+        return f"{round(num * servings, 1)}{rest}"
+    except:
+        return qty_str
+
+def extract_ingredients(text):
+    """Ultra-strict ingredient extraction"""
+    text = text.lower()
+
+    ing_markers = r'(ingredients?:?|सामग्री:?|required items:?|what you need:?)'
+    step_markers = r'(steps?:?|instructions?:?|method:?|विधि:?|how to make:?)'
+    
+    ing_start = re.search(ing_markers, text)
+    step_start = re.search(step_markers, text)
+
+    if ing_start and step_start and ing_start.start() < step_start.start():
+        ing_text = text[ing_start.end():step_start.start()].strip()
+    elif ing_start:
+        ing_text = text[ing_start.end():].strip()
+    else:
+        ing_text = text
+
+    ingredients = []
+    patterns = [
+        r'(\d+(?:\.\d+)?(?:\s*-\s*\d+(?:\.\d+)?)?)?\s*(g|kg|gram|grams|ml|l|liter|litre|pcs?|piece|pieces|tsp|teaspoon|tbsp|tablespoon|cup|cups|pack|packet|medium|large|small)?\s+([a-z][\w\s\-]{3,})(?=\s*(?:,|\.|;|\n|$|\(|\[|to taste|as needed))',
+        r'(half|quarter|a|one|two|three|four|five|six|seven|eight|nine|ten)\s+([a-z][\w\s\-]{3,})(?=\s*(?:,|\.|;|\n|$|\(|\[|to taste|as needed))',
+        r'([a-z][\w\s\-]{3,})\s*(to taste|as needed|as required|a pinch of?|to garnish)',
+    ]
+
+    for pattern in patterns:
+        for match in re.finditer(pattern, ing_text, re.IGNORECASE):
+            qty_str = "as needed"
+            name = ""
+            groups = match.groups()
+
+            if len(groups) >= 3 and groups[2]:
+                qty_num = groups[0] or ""
+                unit = groups[1] or ""
+                name = groups[2].strip()
+                qty_str = f"{qty_num} {unit}".strip() if qty_num or unit else "as needed"
+            elif len(groups) >= 2 and groups[1]:
+                qty_str = groups[0].strip()
+                name = groups[1].strip()
+            elif groups[0]:
+                name = groups[0].strip()
+                qty_str = groups[1].strip() if len(groups) > 1 and groups[1] else "as needed"
+
+            name = name.strip().lower()
+            if not name or len(name) < 4:
+                continue
+
+            reject_patterns = [
+                r'less', r'more', r'taste', r'adjust', r'according', r'required', r'little', r'some', r'few',
+                r'handful', r'pinch', r'amount', r'quantity', r'level', r'degree', r'based', r'prefer',
+                r'optional', r'for serving', r'method', r'instructions', r'prep', r'total time', r'ready',
+                r'enjoy', r'hot', r'cold', r'then', r'now', r'next', r'after', r'finally',
+            ]
+
+            if any(re.search(p, name) for p in reject_patterns):
+                continue
+
+            if re.match(r'^(cook|stir|add|mix|serve|fry|boil|bake|heat|preheat|chop|slice|dice|grate|grind|pour|simmer|use|put|take|keep|let|bring|reduce|thicken|turn|flip|cover|uncover)', name):
+                continue
+
+            ingredients.append({
+                'name': name,
+                'qty_str': qty_str
+            })
+
+    seen = set()
+    unique = [ing for ing in ingredients if ing['name'] not in seen and not seen.add(ing['name'])]
+    return unique
+
+def extract_steps(text):
+    """Extract cooking steps from recipe"""
+    text_lower = text.lower()
+    
+    step_markers = r'(steps?:?|instructions?:?|method:?|विधि:?|how to make:?|procedure:?)'
+    step_start = re.search(step_markers, text_lower)
+    
+    if not step_start:
+        return []
+    
+    steps_text = text[step_start.end():].strip()
+    
+    step_patterns = [
+        r'^\d+[\.\)]\s+(.+?)(?=\n\d+[\.\)]|\Z)',
+        r'^[-•]\s+(.+?)(?=\n[-•]|\Z)',
+        r'^[a-z]\)\s+(.+?)(?=\n[a-z]\)|\Z)',
+    ]
+    
+    steps = []
+    for pattern in step_patterns:
+        matches = re.findall(pattern, steps_text, re.MULTILINE | re.IGNORECASE)
+        if matches:
+            steps = [m.strip() for m in matches if m.strip()]
+            break
+    
+    if not steps:
+        steps = [s.strip() for s in steps_text.split('\n\n') if s.strip()]
+    
+    return steps[:15]
+
+# ================= SYSTEM PROMPT =================
+def get_system_prompt():
+    base = """You are KitchenMate - a chill, friendly Indian cooking assistant.
+Be casual and helpful. Use simple language.
+When giving recipes:
+- List ingredients with quantities
+- Give clear, simple steps
+- End with something friendly"""
+   
+    if st.session_state.language_mode == "English":
+        base += "\nSpeak ONLY in pure English. No Hindi words at all."
+    else:
+        base += "\nUse casual Hindi-English mix."
+   
+    if st.session_state.allergies:
+        base += f"\nUser allergies: {st.session_state.allergies}. Avoid these completely!"
+   
+    low_items = [k for k, v in st.session_state.inventory.items() if v < 200]
+    if low_items:
+        base += f"\nUser has LOW stock of: {', '.join(low_items)}. Prefer recipes using little of these or suggest substitutes."
+   
+    return base
+
+def get_nutrition_prompt(servings):
+    return f"""You are a nutrition calculator. For the given recipe, estimate nutritional values **strictly PER {servings} SERVING(S)**.
+Return format:
+Calories: X kcal
+Protein: X g
+Carbs: X g
+Fat: X g
+Fiber: X g
+
+Be realistic using standard Indian/home-cooked food values. Do NOT give total for whole recipe — only per serving."""
+
+# ================= MAIN APP =================
+st.set_page_config(page_title="KitchenMate", layout="wide")
+st.title("KitchenMate - Smart AI Assistant")
+
+tab1, tab2, tab3, tab4, tab5, tab6, tab_scan = st.tabs([
+    "💬 Chat", "📅 Meal Planner", "🛒 Grocery & Inventory",
+    "🍲 Custom Recipes", "🔥 Tried Recipes", "❤️ Favourite Recipes",
+    "📸 Scan Ingredients"
+])
+
+# Sidebar Settings
+with st.sidebar:
+    st.header("⚙️ Settings")
+    
+    st.markdown("---")
+    st.subheader("🎤 Voice Assistant")
+    voice_enabled = st.toggle("Enable Voice Input/Output", value=st.session_state.voice_enabled)
+    st.session_state.voice_enabled = voice_enabled
+    
+    if st.session_state.voice_enabled:
+        voice_lang = st.radio("Voice Language", ["English", "Hindi"], key="voice_lang_select")
+        st.session_state.voice_language = voice_lang
+    
+    st.markdown("---")
+    st.session_state.allergies = st.text_input(
+        "🚫 Your Allergies",
+        value=st.session_state.allergies,
+        help="I'll try to avoid these in suggestions!"
+    )
+   
+    st.markdown("---")
+    st.subheader("🎛️ Preferences")
+   
+    st.session_state.language_mode = st.radio("Language Mode", ["Hinglish", "English"])
+   
+    pure_veg = st.toggle("🌱 Pure Veg Mode", value=st.session_state.pure_veg_mode)
+    if pure_veg != st.session_state.pure_veg_mode:
+        st.session_state.pure_veg_mode = pure_veg
+        st.rerun()
+   
+    health = st.toggle("💪 Health Mode", value=st.session_state.health_mode)
+    if health != st.session_state.health_mode:
+        st.session_state.health_mode = health
+        st.rerun()
+
+with st.sidebar:
+    st.markdown("---")
+    st.subheader("📏 Units")
+    unit_choice = st.radio("Preferred unit system", ["Metric (kg, g, ml)", "American (lbs, oz, cups)"],
+                           index=0 if st.session_state.unit_system == "metric" else 1)
+    new_system = "metric" if "Metric" in unit_choice else "imperial"
+    if new_system != st.session_state.unit_system:
+        st.session_state.unit_system = new_system
+        st.rerun()
+
+with st.sidebar:
+    st.markdown("---")
+    st.subheader("➕ Custom Ingredient")
+    new_item = st.text_input("New Ingredient Name")
+    new_qty = st.number_input("Quantity (g/ml/pcs)", min_value=0, step=50)
+    new_price = st.number_input("Price per 100g or per piece (₹)", min_value=0.0, step=1.0)
+    if st.button("Add to Inventory") and new_item:
+        key = new_item.lower()
+        st.session_state.inventory[key] = new_qty
+        if new_price > 0:
+            st.session_state.inventory_prices[key] = new_price
+        st.success(f"Added {new_item} ({new_qty})")
+    if st.session_state.inventory:
+        remove_item = st.selectbox("Remove ingredient", [""] + list(st.session_state.inventory.keys()))
+        if remove_item and st.button("Remove"):
+            del st.session_state.inventory[remove_item]
+            st.session_state.inventory_prices.pop(remove_item, None)
+            st.success(f"Removed {remove_item}")
+
+with st.sidebar:
+    st.markdown("---")
+    st.subheader("🛍️ Routine Weekly Grocery")
+    routine_items = ["rice", "flour", "oil", "milk", "eggs", "vegetables", "spices", "fruits"]
+    st.write("Common weekly buys:")
+    for item in routine_items:
+        st.write(f"- {item.capitalize()}")
+    if st.button("Add Routine to Grocery List"):
+        st.session_state.grocery_list.update(routine_items)
+        st.success("Added routine items to grocery list!")
+
+# ────────────── CHAT TAB ──────────────
+with tab1:
+    st.subheader("💬 Chat with Hey Chef")
+   
+    st.session_state.servings = st.number_input("Number of servings", min_value=1, max_value=10, value=st.session_state.servings, step=1)
+   
+    # ────────────── CONTINUOUS LISTENING MODE ──────────────
+    if st.session_state.voice_enabled:
+        st.markdown("---")
+        st.subheader("🎤 Voice Assistant Mode")
+        
+        col_listen1, col_listen2 = st.columns([3, 1])
+        
+        with col_listen1:
+            if st.session_state.listening_status == "idle":
+                status_text = "🟢 Ready - Click to start listening"
+                status_color = "green"
+            elif st.session_state.listening_status == "listening":
+                status_text = "🔴 Listening for 'Hey Chef'..."
+                status_color = "red"
+            elif st.session_state.listening_status == "recording":
+                status_text = "🎙️ Recording your command..."
+                status_color = "orange"
+            elif st.session_state.listening_status == "processing":
+                status_text = "⚙️ Processing..."
+                status_color = "blue"
+            else:
+                status_text = "⚠️ Error"
+                status_color = "gray"
+            
+            st.markdown(f"**Status:** <span style='color:{status_color}; font-size: 18px;'>{status_text}</span>", unsafe_allow_html=True)
+        
+        with col_listen2:
+            if not st.session_state.listening_active:
+                if st.button("🎤 Start Listening", type="primary"):
+                    start_continuous_listening()
+                    st.rerun()
+            else:
+                if st.button("⏹️ Stop Listening", type="secondary"):
+                    stop_continuous_listening()
+                    st.rerun()
+        
+        # Check for voice commands in queue
+        if not st.session_state.voice_command_queue.empty():
+            prompt = st.session_state.voice_command_queue.get()
+            st.success(f"👂 Heard: **{prompt}**")
+            
+            # Process the command (will be handled below in normal flow)
+            st.session_state.listening_status = "idle"
+            # Command will be processed in the regular prompt flow below
+        else:
+            prompt = None
+        
+        # Auto-refresh while listening
+        if st.session_state.listening_active and st.session_state.listening_status in ["listening", "recording"]:
+            time.sleep(0.5)
+            st.rerun()
+        
+        st.markdown("---")
+        st.info("💡 **How to use:** Click 'Start Listening', then say 'Hey Chef' followed by your question!")
+    else:
+        prompt = None
+   
+    # Show chat history
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+   
+    # Voice Input Section
+    video_id = None
+    
+    # Check for YouTube URL in text input first
+    text_prompt = st.chat_input("Kya banayein aaj? Recipe, tip, YouTube link, kuch bhi...")
+    
+    if text_prompt:
+        video_id = detect_youtube_url(text_prompt)
+        if not video_id:
+            prompt = text_prompt
+    
+    # Manual voice recording (if not using continuous mode)
+    if st.session_state.voice_enabled and not st.session_state.listening_active and not video_id and not prompt:
+        st.markdown("#### Or Record Manually:")
+        col_v1, col_v2 = st.columns([4, 1])
+        with col_v1:
+            audio_input = st.audio_input("🎤 Record your question...")
+        with col_v2:
+            st.write("")  # spacing
+            process_voice = st.button("🎙️ Send Voice")
+        
+        if process_voice and audio_input:
+            with st.spinner("🎧 Listening..."):
+                audio_bytes = audio_input.getvalue()
+                prompt = transcribe_audio(audio_bytes)
+                
+                if prompt:
+                    st.success(f"👂 You said: **{prompt}**")
+                else:
+                    st.error("❌ Could not understand. Please speak clearly.")
+    
+    # ────────────── YOUTUBE VIDEO PROCESSING ──────────────
+    if video_id:
+        st.session_state.processing_video = True
+        
+        with st.chat_message("user"):
+            st.markdown(f"🎥 YouTube Video Link")
+        
+        with st.chat_message("assistant"):
+            with st.spinner("📹 Analyzing video..."):
+                
+                # Step 1: Get video description using YouTube API
+                video_data, error = get_video_description(video_id)
+                
+                if error:
+                    st.error(f"❌ {error}")
+                    if "API key" in error:
+                        st.info("""
+                        **How to add YouTube API key:**
+                        1. Get key from: https://console.cloud.google.com
+                        2. Find this line in code: `YOUTUBE_API_KEY = ""`
+                        3. Replace with: `YOUTUBE_API_KEY = "YOUR_KEY_HERE"`
+                        """)
+                    st.session_state.processing_video = False
+                    st.stop()
+                
+                video_title = video_data['title']
+                description = video_data['description']
+                
+                st.markdown(f"**Video:** {video_title}")
+                
+                # Step 2: Check if description has ingredients
+                if len(description) > 100:
+                    st.info("📝 Found detailed description!")
+                    
+                    # Step 3: Extract recipe links from description
+                    recipe_links = extract_recipe_links(description)
+                    
+                    scraped_content = ""
+                    if recipe_links:
+                        st.info(f"🔗 Found recipe link: {recipe_links[0][:50]}...")
+                        with st.spinner("🌐 Fetching recipe from link..."):
+                            scraped_content = scrape_recipe_from_url(recipe_links[0])
+                            if scraped_content:
+                                st.success("✅ Recipe page loaded!")
+                    
+                    # Step 4: Parse recipe from description + scraped content
+                    with st.spinner("🤖 Extracting exact ingredients..."):
+                        recipe = parse_recipe_from_description(description, scraped_content, video_title)
+                        st.markdown(recipe)
+                        
+                        st.session_state.last_recipe = recipe
+                        st.session_state.video_recipe = recipe
+                        st.session_state.messages.append({"role": "user", "content": f"YouTube: {video_title}"})
+                        st.session_state.messages.append({"role": "assistant", "content": recipe})
+                        
+                        # Voice output
+                        if st.session_state.voice_enabled:
+                            lang_code = "hi" if st.session_state.voice_language == "Hindi" else "en"
+                            audio_fp = text_to_speech(recipe, lang_code)
+                            if audio_fp:
+                                st.audio(audio_fp, format="audio/mp3", autoplay=False)
+                
+                else:
+                    # Fallback to transcript if description is too short
+                    st.info("📝 Description is short, trying transcript...")
+                    transcript = extract_youtube_transcript(video_id)
+                    
+                    if transcript:
+                        st.success("✅ Transcript extracted!")
+                        with st.spinner("🤖 Converting transcript to recipe..."):
+                            recipe = parse_recipe_from_transcript(transcript, video_title)
+                            st.markdown(recipe)
+                            
+                            st.session_state.last_recipe = recipe
+                            st.session_state.video_recipe = recipe
+                            st.session_state.messages.append({"role": "user", "content": f"YouTube: {video_title}"})
+                            st.session_state.messages.append({"role": "assistant", "content": recipe})
+                            
+                            if st.session_state.voice_enabled:
+                                lang_code = "hi" if st.session_state.voice_language == "Hindi" else "en"
+                                audio_fp = text_to_speech(recipe, lang_code)
+                                if audio_fp:
+                                    st.audio(audio_fp, format="audio/mp3", autoplay=False)
+                    else:
+                        st.warning("⚠️ No transcript or description available.")
+                        st.info("💡 Try asking me to suggest a similar recipe instead!")
+        
+        st.session_state.processing_video = False
+        st.rerun()
+   
+    if prompt:
+        st.session_state.show_cooking_check = False
+        st.session_state.show_nutrition = False
+        st.session_state.show_substitutes = False
+        st.session_state.ingredients_shown = False
+       
+        allergy_note = f"User allergies: {st.session_state.allergies}. Avoid these!" if st.session_state.allergies else ""
+        full_prompt = prompt + " " + allergy_note
+        if st.session_state.servings > 1:
+            full_prompt += f" (for {st.session_state.servings} people)"
+       
+        st.session_state.messages.append({"role": "user", "content": full_prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        with st.chat_message("assistant"):
+            with st.spinner("Soch raha hoon..."):
+                try:
+                    stream = client.chat.completions.create(
+                        messages=[{"role": "system", "content": get_system_prompt()}, *st.session_state.messages],
+                        model="llama-3.3-70b-versatile",
+                        temperature=0.75,
+                        max_tokens=700,
+                        stream=True
+                    )
+                    response = ""
+                    placeholder = st.empty()
+                    for chunk in stream:
+                        if chunk.choices[0].delta.content:
+                            response += chunk.choices[0].delta.content
+                            placeholder.markdown(response)
+                    st.session_state.messages.append({"role": "assistant", "content": response})
+                    st.session_state.last_recipe = response
+                   
+                    if st.session_state.voice_enabled and response:
+                        lang_code = "hi" if st.session_state.voice_language == "Hindi" else "en"
+                        audio_fp = text_to_speech(response, lang_code)
+                        if audio_fp:
+                            st.audio(audio_fp, format="audio/mp3", autoplay=False)
+                    # Resume listening if in continuous mode
+                    if st.session_state.listening_active:
+                        time.sleep(2)
+                        st.session_state.listening_status = "listening"
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Error: {str(e)}")
+                    if st.session_state.listening_active:
+                        st.session_state.listening_status = "listening"
+    
+    if st.button("😴 Feeling Lazy? Suggest from Inventory"):
+        inventory_str = ", ".join(st.session_state.inventory.keys())
+        lazy_prompt = f"Suggest a simple recipe using only these ingredients: {inventory_str}. Keep it easy and quick."
+        st.session_state.messages.append({"role": "user", "content": lazy_prompt})
+        with st.chat_message("user"):
+            st.markdown(lazy_prompt)
+        with st.chat_message("assistant"):
+            with st.spinner("Soch raha hoon..."):
+                try:
+                    stream = client.chat.completions.create(
+                        messages=[{"role": "system", "content": get_system_prompt()}, *st.session_state.messages],
+                        model="llama-3.3-70b-versatile",
+                        temperature=0.75,
+                        max_tokens=700,
+                        stream=True
+                    )
+                    response = ""
+                    placeholder = st.empty()
+                    for chunk in stream:
+                        if chunk.choices[0].delta.content:
+                            response += chunk.choices[0].delta.content
+                            placeholder.markdown(response)
+                    st.session_state.messages.append({"role": "assistant", "content": response})
+                    st.session_state.last_recipe = response
+                    
+                    if st.session_state.voice_enabled and response:
+                        lang_code = "hi" if st.session_state.voice_language == "Hindi" else "en"
+                        audio_fp = text_to_speech(response, lang_code)
+                        if audio_fp:
+                            st.audio(audio_fp, format="audio/mp3", autoplay=False)
+                    
+                    # Resume listening if in continuous mode
+                    if st.session_state.listening_active:
+                        time.sleep(2)
+                        st.session_state.listening_status = "listening"
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Error: {str(e)}")
+                    if st.session_state.listening_active:
+                        st.session_state.listening_status = "listening"
+                   
+   
+    if st.session_state.messages and st.session_state.messages[-1]["role"] == "assistant":
+        col1, col2, col3, col4 = st.columns([2,2,2,2])
+        with col1:
+            if st.button("🍳 Start Cooking"):
+                st.session_state.show_cooking_check = True
+                st.session_state.show_nutrition = False
+                st.session_state.show_substitutes = False
+                st.session_state.ingredients_shown = False
+                st.rerun()
+        with col2:
+            if st.button("🥗 Calculate Nutrition"):
+                st.session_state.show_nutrition = True
+                st.session_state.show_cooking_check = False
+                st.session_state.show_substitutes = False
+                st.rerun()
+        with col3:
+            if st.button("❤️ Favourite"):
+                recipe_name = f"Recipe {len(st.session_state.favourite_recipes) + 1}"
+                st.session_state.favourite_recipes[recipe_name] = st.session_state.last_recipe
+                st.success(f"Added to Favourites: {recipe_name}")
+        with col4:
+            if st.button("🔄 Substitutes"):
+                st.session_state.show_substitutes = True
+                st.session_state.show_cooking_check = False
+                st.session_state.show_nutrition = False
+                st.rerun()
+   
+    if st.session_state.show_cooking_check and not st.session_state.cooking_mode:
+        st.markdown("---")
+        st.subheader("🍳 Ingredient Check")
+        ingredients = extract_ingredients(st.session_state.last_recipe)
+       
+        if not ingredients:
+            st.info("No ingredients could be detected in the last recipe.")
+            st.session_state.show_cooking_check = False
+            st.rerun()
+       
+        if not st.session_state.ingredients_shown:
+            st.session_state.ingredients_shown = True
+            missing = []
+            for ing in ingredients:
+                name = ing['name'].lower()
+                found_key = None
+                for inv_item in st.session_state.inventory:
+                    if inv_item in name or name in inv_item:
+                        found_key = inv_item
+                        break
+                if not found_key:
+                    missing.append(name)
+            st.session_state.missing_ingredients = missing
+       
+        missing = st.session_state.missing_ingredients
+        status_lines = []
+        total_cost = 0.0
+       
+        for ing in ingredients:
+            name = ing['name'].lower()
+            qty_str = ing['qty_str']
+           
+            scaled_qty = scale_quantity(qty_str, st.session_state.servings)
+            display_qty = convert_quantity(scaled_qty, st.session_state.unit_system)
+           
+            found_key = None
+            for inv_item in st.session_state.inventory:
+                if inv_item in name or name in inv_item:
+                    found_key = inv_item
+                    break
+           
+            if found_key:
+                current_qty = st.session_state.inventory[found_key]
+                status, color = get_quantity_status(current_qty)
+                display_name = found_key.capitalize()
+               
+                price_per_100 = st.session_state.inventory_prices.get(found_key, 0)
+                est_cost = 0.0
+                if price_per_100 > 0:
+                    match = re.search(r'\d*\.?\d+', qty_str)
+                    if match:
+                        num = float(match.group())
+                        portion_factor = num / 100
+                        est_cost = round(price_per_100 * portion_factor * st.session_state.servings, 1)
+                        total_cost += est_cost
+               
+                line = f"✅ **{display_name}**: {display_qty}   <span style='color:{color};'>[{status}]</span>"
+                status_lines.append(line)
+            else:
+                status_lines.append(f"❌ **{name.capitalize()}**: {display_qty}")
+       
+        st.write("### Ingredients List:")
+        for line in status_lines:
+            st.markdown(line, unsafe_allow_html=True)
+       
+        if total_cost > 0:
+            st.caption(f"💰 Estimated cost ≈ ₹{total_cost:.1f}")
+       
+        if missing:
+            st.error(f"**Missing:** {', '.join(m.capitalize() for m in missing)}")
+            col1, col2 = st.columns(2)
+            if col1.button("❌ Abort"):
+                st.session_state.show_cooking_check = False
+                st.session_state.ingredients_shown = False
+                st.rerun()
+            if col2.button("➕ Add Missing to Grocery"):
+                for n in missing:
+                    st.session_state.grocery_list.add(n)
+                st.success(f"Added {len(missing)} items to grocery list!")
+                st.session_state.show_cooking_check = False
+                st.session_state.ingredients_shown = False
+                st.rerun()
+        else:
+            st.success("✅ All ingredients available! Ready to cook?")
+            if st.button("👨‍🍳 Start Step-by-Step Cooking"):
+                st.session_state.cooking_steps = extract_steps(st.session_state.last_recipe)
+                if st.session_state.cooking_steps:
+                    st.session_state.cooking_mode = True
+                    st.session_state.current_step = 0
+                    st.session_state.show_cooking_check = False
+                    st.rerun()
+                else:
+                    st.error("Could not extract steps from recipe")
+
+    if st.session_state.show_nutrition and not st.session_state.cooking_mode:
+        st.markdown("---")
+        st.subheader(f"🥗 Nutrition per {st.session_state.servings} serving(s)")
+        with st.spinner("Calculating nutrition..."):
+            try:
+                stream = client.chat.completions.create(
+                    messages=[{"role": "system", "content": get_nutrition_prompt(st.session_state.servings)},
+                              {"role": "user", "content": st.session_state.last_recipe}],
+                    model="llama-3.3-70b-versatile",
+                    temperature=0.5,
+                    max_tokens=500,
+                    stream=True
+                )
+                response = ""
+                placeholder = st.empty()
+                for chunk in stream:
+                    if chunk.choices[0].delta.content:
+                        response += chunk.choices[0].delta.content
+                        placeholder.markdown(response)
+                
+                if st.session_state.voice_enabled and response:
+                    lang_code = "hi" if st.session_state.voice_language == "Hindi" else "en"
+                    audio_fp = text_to_speech(response, lang_code)
+                    if audio_fp:
+                        st.audio(audio_fp, format="audio/mp3", autoplay=False)
+            except Exception as e:
+                st.error(f"Error: {str(e)}")
+        if st.button("Close Nutrition"):
+            st.session_state.show_nutrition = False
+            st.rerun()
+
+    if st.session_state.show_substitutes and not st.session_state.cooking_mode:
+        st.markdown("---")
+        st.subheader("🔄 Ingredient Substitutes")
+        ingredients = extract_ingredients(st.session_state.last_recipe)
+        missing = [ing['name'] for ing in ingredients if not any(k in ing['name'] or ing['name'] in k for k in st.session_state.inventory)]
+        if missing:
+            st.markdown(f"**Finding alternatives for:** {', '.join(missing)}")
+            with st.spinner("Looking for Indian alternatives..."):
+                try:
+                    sub_prompt = f"Practical Indian substitutes for: {', '.join(missing)}. One or two options each."
+                    stream = client.chat.completions.create(
+                        messages=[{"role": "user", "content": sub_prompt}],
+                        model="llama-3.3-70b-versatile",
+                        temperature=0.6,
+                        max_tokens=400,
+                        stream=True
+                    )
+                    resp = ""
+                    placeholder = st.empty()
+                    for chunk in stream:
+                        if chunk.choices[0].delta.content:
+                            resp += chunk.choices[0].delta.content
+                            placeholder.markdown(resp)
+                    
+                    if st.session_state.voice_enabled and resp:
+                        lang_code = "hi" if st.session_state.voice_language == "Hindi" else "en"
+                        audio_fp = text_to_speech(resp, lang_code)
+                        if audio_fp:
+                            st.audio(audio_fp, format="audio/mp3", autoplay=False)
+                except Exception as e:
+                    st.error(str(e))
+        else:
+            st.info("No missing ingredients!")
+        if st.button("Close Substitutes"):
+            st.session_state.show_substitutes = False
+            st.rerun()
+
+    # ────────────── COOKING MODE ──────────────
+    if st.session_state.cooking_mode:
+        st.markdown("---")
+        st.subheader("👨‍🍳 Step-by-Step Cooking Guide")
+        
+        if st.session_state.cooking_steps:
+            total_steps = len(st.session_state.cooking_steps)
+            current = st.session_state.current_step
+            
+            st.markdown(f"### Step {current + 1} of {total_steps}")
+            step_text = st.session_state.cooking_steps[current]
+            st.markdown(f"**{step_text}**")
+            
+        
+        # Voice output for step (already there, but ensure autoplay)
+        if st.session_state.voice_enabled:
+            lang_code = "hi" if st.session_state.voice_language == "Hindi" else "en"
+            audio_fp = text_to_speech(step_text, lang_code)
+            if audio_fp:
+                st.audio(audio_fp, format="audio/mp3", autoplay=True)  # ← autoplay=True
+            # ───── NEW: TIMER FEATURE ─────
+        # Parse time from step text
+        time_pattern = r'(?:for|about|around|approximately)?\s*(\d+(?:\.\d+)?)\s*(minute|minutes|min|hour|hours|hr|second|seconds|sec|overnight)'
+        match = re.search(time_pattern, step_text.lower())
+        
+        timer_key = f"timer_{current}"
+        if match:
+            amount = float(match.group(1))
+            unit = match.group(2).lower()
+            
+            if unit in ["minute", "minutes", "min"]:
+                seconds = int(amount * 60)
+            elif unit in ["hour", "hours", "hr"]:
+                seconds = int(amount * 3600)
+            elif unit in ["second", "seconds", "sec"]:
+                seconds = int(amount)
+            elif unit == "overnight":
+                seconds = 8 * 3600  # rough 8 hours
+            else:
+                seconds = 0
+            
+            if seconds > 0:
+                st.markdown(f"**Suggested timer:** {amount} {unit}")
+                
+                if f"timer_running_{current}" not in st.session_state:
+                    st.session_state[f"timer_running_{current}"] = False
+                    st.session_state[f"timer_remaining_{current}"] = seconds
+                
+                col_timer1, col_timer2 = st.columns([3, 1])
+                with col_timer1:
+                    if not st.session_state[f"timer_running_{current}"]:
+                        if st.button("⏱️ Start Timer"):
+                            st.session_state[f"timer_running_{current}"] = True
+                            st.session_state[f"timer_start_{current}"] = time.time()
+                            st.rerun()
+                    else:
+                        elapsed = time.time() - st.session_state[f"timer_start_{current}"]
+                        remaining = max(0, st.session_state[f"timer_remaining_{current}"] - elapsed)
+                        
+                        if remaining > 0:
+                            progress = 1 - (remaining / st.session_state[f"timer_remaining_{current}"])
+                            st.progress(progress)
+                            mins, secs = divmod(int(remaining), 60)
+                            st.markdown(f"**Time left:** {mins:02d}:{secs:02d}")
+                            st.rerun()  # auto-refresh every second
+                        else:
+                            st.success("🎉 Time's up!")
+                            st.balloons()
+                            st.session_state[f"timer_running_{current}"] = False
+                            # Play beep sound (browser alert sound)
+                            st.markdown(
+                                '<audio autoplay><source src="data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=" type="audio/wav"></audio>',
+                                unsafe_allow_html=True
+                            )
+                
+                with col_timer2:
+                    if st.session_state[f"timer_running_{current}"]:
+                        if st.button("Pause"):
+                            st.session_state[f"timer_remaining_{current}"] -= (time.time() - st.session_state[f"timer_start_{current}"])
+                            st.session_state[f"timer_running_{current}"] = False
+                            st.rerun()
+                        if st.button("Reset"):
+                            st.session_state[f"timer_running_{current}"] = False
+                            st.rerun()
+        
+        # ───── END OF TIMER FEATURE ─────
+            # Step controls
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                if st.button("⬅️ Previous" if current > 0 else "⬅️ First"):
+                    if current > 0:
+                        st.session_state.current_step -= 1
+                        st.rerun()
+            
+            with col2:
+                if st.button("🔄 Repeat"):
+                    if st.session_state.voice_enabled:
+                        lang_code = "hi" if st.session_state.voice_language == "Hindi" else "en"
+                        audio_fp = text_to_speech(step_text, lang_code)
+                        if audio_fp:
+                            st.audio(audio_fp, format="audio/mp3", autoplay=True)
+                    st.info(f"🔄 Repeating: {step_text}")
+            
+            with col3:
+                if st.button("➡️ Next" if current < total_steps - 1 else "✅ Done!"):
+                    if current < total_steps - 1:
+                        st.session_state.current_step += 1
+                        st.rerun()
+                    else:
+                        st.session_state.cooking_mode = False
+                        st.session_state.current_step = 0
+                        st.session_state.cooking_steps = []
+                        st.rerun()
+            
+            with col4:
+                if st.button("⛔ Exit Cooking"):
+                    st.session_state.cooking_mode = False
+                    st.session_state.current_step = 0
+                    st.session_state.cooking_steps = []
+                    st.session_state.show_cooking_check = False
+                    st.rerun()
+            
+            # Voice commands if enabled
+            if st.session_state.voice_enabled:
+                st.markdown("---")
+    st.info("🎤 Say: next, previous, repeat, start timer, pause timer, resume timer, reset timer, done")
+
+    if st.button("🎤 Voice Command", type="primary"):
+        with st.spinner("Listening..."):
+            audio_input = st.audio_input("Speak now (next / repeat / timer commands)...")
+            if audio_input:
+                audio_bytes = audio_input.getvalue()
+                command = transcribe_audio(audio_bytes)
+                
+                if command:
+                    command = command.lower().strip()
+                    st.success(f"Heard: **{command}**")
+                            
+                            # Process voice command
+                    if any(word in command for word in ["next", "next step", "continue", "ahead"]):
+                        if current < total_steps - 1:
+                            st.session_state.current_step += 1
+                            st.rerun()
+                        else:
+                            st.balloons()
+                            st.success("All steps completed!")
+                            st.session_state.cooking_mode = False
+                            st.rerun()
+                    
+                    elif any(word in command for word in ["previous", "back", "last"]):
+                        if current > 0:
+                            st.session_state.current_step -= 1
+                            st.rerun()
+                        else:
+                            st.info("Already at first step")
+                    
+                    elif any(word in command for word in ["repeat", "again", "repeat step"]):
+                        if st.session_state.voice_enabled:
+                            lang_code = "hi" if st.session_state.voice_language == "Hindi" else "en"
+                            audio_fp = text_to_speech(step_text, lang_code)
+                            if audio_fp:
+                                st.audio(audio_fp, format="audio/mp3", autoplay=True)
+                        st.info("Repeating current step")
+                    
+                    elif any(word in command for word in ["start timer", "timer on", "begin timer"]):
+                        # Start timer logic (if timer exists for this step)
+                        if f"timer_remaining_{current}" in st.session_state and st.session_state[f"timer_remaining_{current}"] > 0:
+                            st.session_state[f"timer_running_{current}"] = True
+                            st.session_state[f"timer_start_{current}"] = time.time()
+                            st.success("Timer started!")
+                            st.rerun()
+                        else:
+                            st.warning("No timer set for this step")
+                    
+                    elif any(word in command for word in ["pause timer", "stop timer"]):
+                        if st.session_state.get(f"timer_running_{current}", False):
+                            elapsed = time.time() - st.session_state[f"timer_start_{current}"]
+                            st.session_state[f"timer_remaining_{current}"] -= elapsed
+                            st.session_state[f"timer_running_{current}"] = False
+                            st.success("Timer paused")
+                            st.rerun()
+                    
+                    elif "resume" in command:
+                        if f"timer_remaining_{current}" in st.session_state and st.session_state[f"timer_remaining_{current}"] > 0:
+                            st.session_state[f"timer_running_{current}"] = True
+                            st.session_state[f"timer_start_{current}"] = time.time()
+                            st.success("Timer resumed!")
+                            st.rerun()
+                    
+                    elif "reset" in command:
+                        if f"timer_remaining_{current}" in st.session_state:
+                            st.session_state[f"timer_running_{current}"] = False
+                            st.rerun()
+                            st.info("Timer reset")
+                    
+                    elif any(word in command for word in ["done", "finish", "complete"]):
+                        st.balloons()
+                        st.success("Cooking completed!")
+                        st.session_state.cooking_mode = False
+                        st.rerun()
+                    
+                    else:
+                        st.warning(f"Didn't understand: '{command}'\nTry: next, previous, repeat, start timer, pause timer, done")
+                else:
+                     st.error("Couldn't hear clearly. Try again.")
+# ────────────── MEAL PLANNER ──────────────
+with tab2:
+    st.subheader("📅 Meal Planner")
+    tomorrow = datetime.now() + timedelta(days=1)
+    selected_date = st.date_input("Plan for:", value=tomorrow)
+    date_key = selected_date.strftime("%Y-%m-%d")
+    meals = ["Breakfast", "Morning Snack", "Lunch", "Evening Snack", "Dinner"]
+    planned = st.session_state.meal_plan.get(date_key, {})
+    for meal in meals:
+        with st.expander(f"🍽️ {meal}"):
+            dish = st.text_input(f"What for {meal}?", value=planned.get(meal, ""), key=f"meal_{date_key}_{meal}")
+            if dish and st.button(f"Save {meal}", key=f"save_{date_key}_{meal}"):
+                if date_key not in st.session_state.meal_plan:
+                    st.session_state.meal_plan[date_key] = {}
+                st.session_state.meal_plan[date_key][meal] = dish
+                st.success(f"{meal} saved: {dish}")
+    if date_key in st.session_state.meal_plan:
+        st.markdown("### Planned Meals")
+        for m, d in st.session_state.meal_plan[date_key].items():
+            st.write(f"**{m}**: {d}")
+
+# ────────────── GROCERY & INVENTORY ──────────────
+with tab3:
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("🥫 Your Inventory")
+        for item, qty in sorted(st.session_state.inventory.items()):
+            status, color = get_quantity_status(qty)
+            price = st.session_state.inventory_prices.get(item, None)
+            price_str = f" (₹{price}/100g)" if price else ""
+            st.markdown(f"- {item.capitalize()}: {qty} <span style='color:{color};'>[{status}]{price_str}</span>", unsafe_allow_html=True)
+    with col2:
+        st.subheader("🛒 Grocery List")
+        if not st.session_state.grocery_list:
+            st.info("List khali hai!")
+        else:
+            to_add = []
+            for item in sorted(st.session_state.grocery_list):
+                if st.checkbox(f"{item.capitalize()}", key=f"grocery_check_{item}"):
+                    to_add.append(item)
+            if to_add:
+                for item in to_add:
+                    st.session_state.inventory[item.lower()] = 500
+                    st.session_state.grocery_list.remove(item)
+                st.success(f"Added {len(to_add)} items to inventory!")
+                st.rerun()
+        if st.button("Clear Grocery"):
+            st.session_state.grocery_list.clear()
+            st.rerun()
+    with st.sidebar:
+         st.markdown("---")
+    st.subheader("➕ Add to Inventory")
+    new_item = st.text_input("Item Name")
+    new_qty = st.number_input("Quantity (g/ml/pcs)", min_value=0, step=50)
+    new_price = st.number_input("Price per 100g/piece (₹)", min_value=0.0, step=1.0)
+
+    expiry_option = st.radio("Expiry Date", ["Estimate for me", "Manual input"])
+
+    if st.button("Add Item") and new_item:
+        key = new_item.lower().strip()
+        st.session_state.inventory[key] = new_qty
+        if new_price > 0:
+            st.session_state.inventory_prices[key] = new_price
+
+        if expiry_option == "Estimate for me":
+            days = get_expiry_estimate(key)
+            st.session_state.inventory_expiry[key] = days
+            st.success(f"Added {new_item} ({new_qty}) — estimated expiry in ~{days} days")
+        else:
+            days = st.number_input("Days until expiry", min_value=1, step=1, key="manual_days")
+            st.session_state.inventory_expiry[key] = days
+            st.success(f"Added {new_item} ({new_qty}) — expires in {days} days")
+
+        st.rerun()
+
+    # Show current inventory with expiry
+    if st.session_state.inventory:
+        st.markdown("### Current Inventory")
+        for item, qty in sorted(st.session_state.inventory.items()):
+            expiry_days = st.session_state.inventory_expiry.get(item, None)
+            if expiry_days is not None:
+                if expiry_days < 0:
+                    status = f"Expired ({expiry_days} days ago)"
+                    color = "red"
+                elif expiry_days <= 3:
+                    status = f"Urgent ({expiry_days} days left)"
+                    color = "orange"
+                else:
+                    status = f"OK ({expiry_days} days left)"
+                    color = "green"
+                st.markdown(f"- **{item.capitalize()}**: {qty}g/ml  <span style='color:{color}'>{status}</span>", unsafe_allow_html=True)
+            else:
+                st.write(f"- {item.capitalize()}: {qty}g/ml")
+# ────────────── CUSTOM RECIPES ──────────────
+with tab4:
+    st.subheader("🍲 Custom Recipes")
+    with st.expander("➕ Create New Custom Recipe"):
+        name = st.text_input("Recipe Name")
+        ingredients = st.text_area("Ingredients")
+        steps = st.text_area("Steps")
+       
+        if st.button("Save Custom Recipe") and name and ingredients and steps:
+            st.session_state.custom_recipes[name] = {"ingredients": ingredients, "steps": steps}
+            st.success(f"Saved: {name}")
+    if st.session_state.custom_recipes:
+        st.markdown("### Your Custom Recipes")
+        for name, data in st.session_state.custom_recipes.items():
+            with st.expander(name):
+                st.write("**Ingredients:**", data["ingredients"])
+                st.write("**Steps:**", data["steps"])
+
+# ────────────── TRIED RECIPES ──────────────
+with tab5:
+    st.subheader("🔥 Tried Recipes")
+    if not st.session_state.tried_recipes:
+        st.info("No recipes tried yet! Cook something to see here.")
+    else:
+        for idx, entry in enumerate(reversed(st.session_state.tried_recipes), 1):
+            stars = "★" * entry["rating"] + "☆" * (5 - entry["rating"])
+            with st.expander(f"Recipe {idx} – {entry['date']} – {stars}"):
+                st.markdown(entry["recipe"])
+
+# ────────────── FAVOURITE RECIPES ──────────────
+with tab6:
+    st.subheader("❤️ Favourite Recipes")
+    if not st.session_state.favourite_recipes:
+        st.info("No favourites yet! Heart a recipe to add.")
+    else:
+        for name, recipe in st.session_state.favourite_recipes.items():
+            with st.expander(name):
+                st.markdown(recipe)
+
+# ────────────── NEW TAB: SCAN INGREDIENTS (OpenRouter) ──────────────
+with tab_scan:
+    st.subheader("📸 Scan Ingredients")
+    st.info("Take or upload photo → AI detects items → add to grocery/inventory")
+
+    col_cam, col_upload = st.columns(2)
+    with col_cam:
+        camera_img = st.camera_input("Take photo of ingredients")
+    with col_upload:
+        uploaded_img = st.file_uploader("Or upload photo", type=["jpg", "jpeg", "png"])
+
+    img_file = camera_img or uploaded_img
+
+    if img_file is not None:
+        st.image(img_file, caption="Your photo", use_column_width=True)
+
+        if st.button("Detect Ingredients with AI"):
+            with st.spinner("Analyzing photo..."):
+                image_bytes = img_file.getvalue()
+                detected_items = detect_ingredients_from_image(image_bytes)
+                if detected_items:
+                    st.success("Detected items:")
+                    selected = []
+                    for item in detected_items:
+                        if st.checkbox(item.capitalize()):
+                            selected.append(item)
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.button("Add Selected to Grocery"):
+                            st.session_state.grocery_list.update(selected)
+                            st.success(f"Added {len(selected)} items to grocery!")
+                    with col2:
+                        if st.button("Add Selected to Inventory"):
+                            for item in selected:
+                                st.session_state.inventory[item.lower()] = 500
+                            st.success(f"Added {len(selected)} items to inventory!")
+                else:
+                    st.warning("No ingredients detected. Try a clearer photo.")
+
+# Footer
+st.markdown("---")
+st.caption("Hey Chef • Chat + Meal Planner + Grocery + Custom Recipes + Tried + Favourites • " + datetime.now().strftime("%Y-%m-%d"))
