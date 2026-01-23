@@ -563,7 +563,15 @@ def extract_ingredients(text):
                 r'less', r'more', r'taste', r'adjust', r'according', r'required', r'little', r'some', r'few',
                 r'handful', r'pinch', r'amount', r'quantity', r'level', r'degree', r'based', r'prefer',
                 r'optional', r'for serving', r'method', r'instructions', r'prep', r'total time', r'ready',
-                r'enjoy', r'hot', r'cold', r'then', r'now', r'next', r'after', r'finally',
+                r'enjoy', r'hot', r'cold', r'then', r'now', r'next', r'after', r'finally', r'choice' , r'garnish'
+                r'chopped' , r'minced' , r'cut' , r'sliced' , r'diced' , r'grated' , r'ground' , r'into' , r'pieces'
+                r'small pieces' , r'large pieces' , r'skewers' , r'grilling' , r'baking' , r'boiling' , r'frying'
+                r'cooking' , r'heat' , r'preheat' , r'simmer' , r'reduce' , r'thicken' , r'flip' , r'cover' , r'uncover'
+                r'pour' , r'mix' , r'stir' , r'add' , r'put' , r'take' , r'keep' , r'let' , r'bring' , r'turn'
+                r'serve' , r'for' , r'with' , r'and' , r'or' , r'finely' , r'chopped' , r'split' , r'brushing' , 
+                r'marinating' , r'whisked' , r'beaten' , r'lukewarm' , r'thinly' , r'as' , r'toasting' , r'roasting'
+                r'grilling' , r'sauté' , r'sauteing' , r'browning' , r'browned' , r'works' , r'well' , r'good'
+               
             ]
 
             if any(re.search(p, name) for p in reject_patterns):
