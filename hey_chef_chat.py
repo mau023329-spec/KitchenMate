@@ -22,6 +22,14 @@ import random
 GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 OPENROUTER_API_KEY = st.secrets["OPENROUTER_API_KEY"]
 YOUTUBE_API_KEY = st.secrets["YOUTUBE_API_KEY"]
+
+# Initialize clients
+client = Groq(api_key=GROQ_API_KEY)
+
+openrouter_client = OpenAI(
+    api_key=OPENROUTER_API_KEY,
+    base_url="https://openrouter.ai/api/v1",
+)
 # ================= SESSION STATE =================
 if "messages" not in st.session_state:
     st.session_state.messages = []
