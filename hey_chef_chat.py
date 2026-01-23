@@ -447,11 +447,13 @@ def transcribe_audio(audio_bytes):
         st.error(f"Transcription error: {str(e)}")
         return None
 
-def text_to_speech(text):
-    lang = "mr" if st.session_state.voice_language == "Marathi" else \
-           "hi" if st.session_state.voice_language == "Hindi" else "en"
+def text_to_speech(text, lang_code=None):
+    """Convert text to speech. If lang_code not provided, uses session state."""
+    if lang_code is None:
+        lang_code = "mr" if st.session_state.voice_language == "Marathi" else \
+                   "hi" if st.session_state.voice_language == "Hindi" else "en"
     try:
-        tts = gTTS(text=text, lang=lang, slow=False)
+        tts = gTTS(text=text, lang=lang_code, slow=False)
         fp = io.BytesIO()
         tts.write_to_fp(fp)
         fp.seek(0)
