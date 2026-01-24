@@ -706,9 +706,13 @@ def is_valid_food_ingredient(name):
             return True
     
     return False
-
-def extract_ingredients(text):
-    """Enhanced ingredient extraction with ACCEPT pattern"""
+def extract_ingredients(text, jain_mode=False):
+    """Enhanced ingredient extraction with ACCEPT pattern
+    
+    Args:
+        text: Recipe text to extract ingredients from
+        jain_mode: If True, filter out non-Jain ingredients
+    """
     text = text.lower()
 
     ing_markers = r'(ingredients?:?|सामग्री:?|required items:?|what you need:?)'
@@ -735,6 +739,9 @@ def extract_ingredients(text):
         
         # Check if it's a valid food ingredient
         if is_valid_food_ingredient(name):
+            # Skip if Jain mode and ingredient is not compatible
+            if jain_mode and not is_jain_compatible(name):
+                continue
             ingredients.append({
                 'name': name,
                 'qty_str': qty_str
@@ -748,6 +755,9 @@ def extract_ingredients(text):
         name = match.group(2).strip()
         
         if is_valid_food_ingredient(name):
+            # Skip if Jain mode and ingredient is not compatible
+            if jain_mode and not is_jain_compatible(name):
+                continue
             ingredients.append({
                 'name': name,
                 'qty_str': qty_str
@@ -760,6 +770,9 @@ def extract_ingredients(text):
         name = match.group(1).strip()
         
         if is_valid_food_ingredient(name):
+            # Skip if Jain mode and ingredient is not compatible
+            if jain_mode and not is_jain_compatible(name):
+                continue
             ingredients.append({
                 'name': name,
                 'qty_str': 'as needed'
@@ -790,6 +803,9 @@ def extract_ingredients(text):
                     name = re.sub(r'\s*,.*$', '', name)
                     
                     if is_valid_food_ingredient(name):
+                        # Skip if Jain mode and ingredient is not compatible
+                        if jain_mode and not is_jain_compatible(name):
+                            continue
                         # Check if not already added
                         if not any(ing['name'] == name for ing in ingredients):
                             ingredients.append({
