@@ -101,6 +101,8 @@ if "voice_command_queue" not in st.session_state:
     st.session_state.voice_command_queue = queue.Queue()
 if "listening_thread" not in st.session_state:
     st.session_state.listening_thread = None
+if "jain_mode" not in st.session_state:
+    st.session_state.jain_mode = False
 
 # ================= VOICE HELPERS =================
 def listen_for_wake_word_chunk():
@@ -512,9 +514,201 @@ def scale_quantity(qty_str, servings=1):
         return f"{round(num * servings, 1)}{rest}"
     except:
         return qty_str
+# ================= INGREDIENT ACCEPT PATTERNS =================
+
+# Comprehensive food ingredient categories
+VEGETABLES = [
+    "onion", "tomato", "potato", "garlic", "ginger", "carrot", "beetroot",
+    "capsicum", "bell pepper", "cabbage", "cauliflower", "broccoli",
+    "spinach", "palak", "methi", "fenugreek", "coriander", "cilantro",
+    "curry leaves", "mint", "pudina", "beans", "peas", "corn",
+    "cucumber", "radish", "turnip", "pumpkin", "bottle gourd", "lauki",
+    "bitter gourd", "karela", "ridge gourd", "turai", "eggplant", "brinjal",
+    "okra", "bhindi", "mushroom", "zucchini", "lettuce", "celery",
+    "spring onion", "leek", "sweet potato", "yam", "colocasia", "arbi"
+]
+
+SPICES = [
+    "turmeric", "haldi", "cumin", "jeera", "coriander", "dhaniya",
+    "chilli", "chili", "red chilli", "green chilli", "kashmiri chilli",
+    "black pepper", "white pepper", "cardamom", "elaichi", "cinnamon",
+    "dalchini", "clove", "laung", "bay leaf", "tej patta", "star anise",
+    "fennel", "saunf", "fenugreek", "methi", "mustard", "sarson", "rai",
+    "asafoetida", "hing", "nutmeg", "jaiphal", "mace", "javitri",
+    "carom seeds", "ajwain", "nigella", "kalonji", "sesame", "til",
+    "poppy seeds", "khus khus", "garam masala", "chaat masala",
+    "pav bhaji masala", "chole masala", "biryani masala", "tandoori masala",
+    "curry powder", "sambhar powder", "rasam powder", "chilli powder",
+    "coriander powder", "cumin powder", "turmeric powder", "ginger powder",
+    "garlic powder", "dried mango", "amchur", "dried pomegranate", "anardana",
+    "saffron", "kesar", "vanilla", "oregano", "basil", "thyme", "rosemary",
+    "paprika", "cayenne"
+]
+
+GRAINS_PULSES = [
+    "rice", "basmati rice", "sona masoori", "brown rice", "jasmine rice",
+    "wheat", "flour", "atta", "maida", "all purpose flour", "whole wheat",
+    "semolina", "sooji", "rava", "besan", "gram flour", "chickpea flour",
+    "corn flour", "cornstarch", "rice flour", "ragi", "finger millet",
+    "jowar", "sorghum", "bajra", "pearl millet", "oats", "quinoa",
+    "dal", "lentil", "moong dal", "mung dal", "toor dal", "arhar dal",
+    "chana dal", "masoor dal", "urad dal", "chickpea", "kabuli chana",
+    "black chickpea", "kala chana", "rajma", "kidney beans", "black beans",
+    "white beans", "pinto beans", "soybean", "peanut", "groundnut",
+    "almond", "badam", "cashew", "kaju", "walnut", "akhrot", "pistachio",
+    "pista", "raisin", "kishmish", "dates", "khajoor", "coconut", "nariyal"
+]
+
+DAIRY_PRODUCTS = [
+    "milk", "doodh", "cream", "heavy cream", "fresh cream", "whipping cream",
+    "butter", "makhan", "ghee", "clarified butter", "paneer", "cottage cheese",
+    "cheese", "cheddar", "mozzarella", "parmesan", "cream cheese",
+    "curd", "yogurt", "dahi", "buttermilk", "chaas", "khoya", "mawa",
+    "condensed milk", "evaporated milk", "milk powder", "malai"
+]
+
+PROTEINS = [
+    "chicken", "mutton", "lamb", "goat", "beef", "pork", "fish", "machli",
+    "prawn", "shrimp", "crab", "salmon", "tuna", "pomfret", "rohu",
+    "egg", "anda", "tofu", "soya chunks", "soy", "tempeh"
+]
+
+OILS_FATS = [
+    "oil", "tel", "mustard oil", "coconut oil", "olive oil", "sunflower oil",
+    "vegetable oil", "sesame oil", "groundnut oil", "peanut oil",
+    "ghee", "butter", "margarine", "lard"
+]
+
+SWEETENERS = [
+    "sugar", "chini", "jaggery", "gur", "brown sugar", "honey", "shahad",
+    "maple syrup", "corn syrup", "stevia", "artificial sweetener",
+    "palm sugar", "coconut sugar", "date syrup"
+]
+
+SAUCES_CONDIMENTS = [
+    "tomato sauce", "ketchup", "soy sauce", "vinegar", "sirka",
+    "tamarind", "imli", "lemon", "nimbu", "lime", "orange", "pomegranate",
+    "tomato paste", "tomato puree", "chilli sauce", "hot sauce",
+    "worcestershire sauce", "fish sauce", "oyster sauce", "hoisin sauce",
+    "mayonnaise", "mustard sauce", "pickle", "achar", "chutney"
+]
+
+BREADS_PASTA = [
+    "bread", "pav", "bun", "roti", "chapati", "naan", "paratha",
+    "puri", "bhatura", "kulcha", "pasta", "macaroni", "spaghetti",
+    "noodles", "vermicelli", "seviyan", "couscous"
+]
+
+BEVERAGES = [
+    "water", "pani", "tea", "chai", "coffee", "juice", "coconut water",
+    "stock", "broth", "vegetable stock", "chicken stock", "bone broth"
+]
+
+OTHERS = [
+    "salt", "namak", "baking soda", "baking powder", "yeast", "gelatin",
+    "agar agar", "corn", "cornmeal", "breadcrumbs", "panko",
+    "chocolate", "cocoa", "coffee powder", "tea leaves"
+]
+
+# Combine all categories
+ALL_FOOD_INGREDIENTS = (
+    VEGETABLES + SPICES + GRAINS_PULSES + DAIRY_PRODUCTS + 
+    PROTEINS + OILS_FATS + SWEETENERS + SAUCES_CONDIMENTS + 
+    BREADS_PASTA + BEVERAGES + OTHERS
+)
+
+# Create a set for faster lookup
+FOOD_INGREDIENTS_SET = set([item.lower() for item in ALL_FOOD_INGREDIENTS])
+# ================= JAIN DIET RESTRICTIONS =================
+# Ingredients NOT allowed in Jain diet (grown underground)
+JAIN_RESTRICTED_INGREDIENTS = [
+    # Root vegetables
+    "potato", "potatoes", "aloo", "sweet potato", "shakarkandi",
+    "onion", "onions", "pyaz", "spring onion", "scallion", "leek",
+    "garlic", "lahsun", "lehsun",
+    "ginger", "adrak",
+    "radish", "mooli", "daikon",
+    "carrot", "carrots", "gajar",
+    "beetroot", "beet", "chukandar",
+    "turnip", "shalgam",
+    "yam", "suran", "jimikand",
+    "colocasia", "arbi", "taro root",
+    "elephant yam", "suran",
+    "turmeric", "haldi",  # Fresh turmeric root
+    "ginger garlic paste",
+    "peanut", "groundnut", "moongfali",  # Grows underground
+]
+
+# Create set for faster lookup
+JAIN_RESTRICTED_SET = set([item.lower() for item in JAIN_RESTRICTED_INGREDIENTS])
+
+def is_jain_compatible(ingredient_name):
+    """Check if ingredient is compatible with Jain diet"""
+    ingredient_name = ingredient_name.lower().strip()
+    
+    # Check if it contains any restricted ingredient
+    for restricted in JAIN_RESTRICTED_SET:
+        if restricted in ingredient_name:
+            # Exception: turmeric powder is allowed
+            if "turmeric" in ingredient_name and "powder" in ingredient_name:
+                continue
+            return False
+    
+    return True
+
+def get_jain_substitute(ingredient_name):
+    """Get Jain-friendly substitute for restricted ingredient"""
+    ingredient_name = ingredient_name.lower()
+    
+    substitutes = {
+        "potato": "raw banana (kachha kela), arrowroot (ararot), or sweet corn",
+        "onion": "asafoetida (hing) for flavor, or finely chopped cabbage",
+        "garlic": "asafoetida (hing) for flavor",
+        "ginger": "dry ginger powder (sonth) or green chilli for heat",
+        "radish": "cucumber or white pumpkin (petha)",
+        "carrot": "bottle gourd (lauki), red pumpkin, or tomatoes",
+        "beetroot": "red pumpkin or tomatoes for color",
+        "turnip": "white pumpkin (petha) or bottle gourd",
+        "peanut": "cashew, almond, or melon seeds",
+        "turmeric": "turmeric powder (powder form is allowed)",
+        "ginger garlic paste": "green chilli paste with asafoetida (hing)",
+    }
+    
+    for key, substitute in substitutes.items():
+        if key in ingredient_name:
+            return substitute
+    
+    return "Please check Jain diet guidelines for substitute"
+# Cooking verbs to reject
+COOKING_VERBS = [
+    "cook", "stir", "add", "mix", "serve", "fry", "boil", "bake", "heat",
+    "preheat", "chop", "slice", "dice", "grate", "grind", "pour", "simmer",
+    "use", "put", "take", "keep", "let", "bring", "reduce", "thicken",
+    "turn", "flip", "cover", "uncover", "sauté", "roast", "steam",
+    "blend", "whisk", "knead", "marinate", "garnish", "season", "taste"
+]
+
+def is_valid_food_ingredient(name):
+    """Check if the name is a valid food ingredient"""
+    name = name.lower().strip()
+    
+    # Too short
+    if len(name) < 3:
+        return False
+    
+    # Check if it's a cooking verb
+    if any(name.startswith(verb) for verb in COOKING_VERBS):
+        return False
+    
+    # Check if any known ingredient is in the name
+    for ingredient in FOOD_INGREDIENTS_SET:
+        if ingredient in name or name in ingredient:
+            return True
+    
+    return False
 
 def extract_ingredients(text):
-    """Ultra-strict ingredient extraction"""
+    """Enhanced ingredient extraction with ACCEPT pattern"""
     text = text.lower()
 
     ing_markers = r'(ingredients?:?|सामग्री:?|required items:?|what you need:?)'
@@ -531,63 +725,88 @@ def extract_ingredients(text):
         ing_text = text
 
     ingredients = []
-    patterns = [
-        r'(\d+(?:\.\d+)?(?:\s*-\s*\d+(?:\.\d+)?)?)?\s*(g|kg|gram|grams|ml|l|liter|litre|pcs?|piece|pieces|tsp|teaspoon|tbsp|tablespoon|cup|cups|pack|packet|medium|large|small)?\s+([a-z][\w\s\-]{3,})(?=\s*(?:,|\.|;|\n|$|\(|\[|to taste|as needed))',
-        r'(half|quarter|a|one|two|three|four|five|six|seven|eight|nine|ten)\s+([a-z][\w\s\-]{3,})(?=\s*(?:,|\.|;|\n|$|\(|\[|to taste|as needed))',
-        r'([a-z][\w\s\-]{3,})\s*(to taste|as needed|as required|a pinch of?|to garnish)',
-    ]
-
-    for pattern in patterns:
-        for match in re.finditer(pattern, ing_text, re.IGNORECASE):
-            qty_str = "as needed"
-            name = ""
-            groups = match.groups()
-
-            if len(groups) >= 3 and groups[2]:
-                qty_num = groups[0] or ""
-                unit = groups[1] or ""
-                name = groups[2].strip()
-                qty_str = f"{qty_num} {unit}".strip() if qty_num or unit else "as needed"
-            elif len(groups) >= 2 and groups[1]:
-                qty_str = groups[0].strip()
-                name = groups[1].strip()
-            elif groups[0]:
-                name = groups[0].strip()
-                qty_str = groups[1].strip() if len(groups) > 1 and groups[1] else "as needed"
-
-            name = name.strip().lower()
-            if not name or len(name) < 4:
-                continue
-
-            reject_patterns = [
-                r'less', r'more', r'taste', r'adjust', r'according', r'required', r'little', r'some', r'few',
-                r'handful', r'pinch', r'amount', r'quantity', r'level', r'degree', r'based', r'prefer',
-                r'optional', r'for serving', r'method', r'instructions', r'prep', r'total time', r'ready',
-                r'enjoy', r'hot', r'cold', r'then', r'now', r'next', r'after', r'finally', r'choice' , r'garnish'
-                r'chopped' , r'minced' , r'cut' , r'sliced' , r'diced' , r'grated' , r'ground' , r'into' , r'pieces'
-                r'small pieces' , r'large pieces' , r'skewers' , r'grilling' , r'baking' , r'boiling' , r'frying'
-                r'cooking' , r'heat' , r'preheat' , r'simmer' , r'reduce' , r'thicken' , r'flip' , r'cover' , r'uncover'
-                r'pour' , r'mix' , r'stir' , r'add' , r'put' , r'take' , r'keep' , r'let' , r'bring' , r'turn'
-                r'serve' , r'for' , r'with' , r'and' , r'or' , r'finely' , r'chopped' , r'split' , r'brushing' , 
-                r'marinating' , r'whisked' , r'beaten' , r'lukewarm' , r'thinly' , r'as' , r'toasting' , r'roasting'
-                r'grilling' , r'sauté' , r'sauteing' , r'browning' , r'browned' , r'works' , r'well' , r'good'
-               
-            ]
-
-            if any(re.search(p, name) for p in reject_patterns):
-                continue
-
-            if re.match(r'^(cook|stir|add|mix|serve|fry|boil|bake|heat|preheat|chop|slice|dice|grate|grind|pour|simmer|use|put|take|keep|let|bring|reduce|thicken|turn|flip|cover|uncover)', name):
-                continue
-
+    
+    # Pattern 1: Quantity + Unit + Ingredient
+    pattern1 = r'(\d+(?:\.\d+)?(?:\s*-\s*\d+(?:\.\d+)?)?\s*(?:g|kg|gram|grams|ml|l|liter|litre|pcs?|piece|pieces|tsp|teaspoon|tbsp|tablespoon|cup|cups|pack|packet)?)\s+([a-z][\w\s\-]{2,}?)(?=\s*(?:,|\.|;|\n|$|\(|\[))'
+    
+    for match in re.finditer(pattern1, ing_text, re.IGNORECASE):
+        qty_str = match.group(1).strip()
+        name = match.group(2).strip()
+        
+        # Check if it's a valid food ingredient
+        if is_valid_food_ingredient(name):
             ingredients.append({
                 'name': name,
                 'qty_str': qty_str
             })
-
+    
+    # Pattern 2: Word quantities (half, quarter, one, two, etc.) + Ingredient
+    pattern2 = r'(half|quarter|a|one|two|three|four|five|six|seven|eight|nine|ten)\s+([a-z][\w\s\-]{3,}?)(?=\s*(?:,|\.|;|\n|$|\(|\[))'
+    
+    for match in re.finditer(pattern2, ing_text, re.IGNORECASE):
+        qty_str = match.group(1).strip()
+        name = match.group(2).strip()
+        
+        if is_valid_food_ingredient(name):
+            ingredients.append({
+                'name': name,
+                'qty_str': qty_str
+            })
+    
+    # Pattern 3: Ingredient with "to taste", "as needed", etc.
+    pattern3 = r'([a-z][\w\s\-]{3,}?)\s*(to taste|as needed|as required|a pinch|to garnish|for garnishing)'
+    
+    for match in re.finditer(pattern3, ing_text, re.IGNORECASE):
+        name = match.group(1).strip()
+        
+        if is_valid_food_ingredient(name):
+            ingredients.append({
+                'name': name,
+                'qty_str': 'as needed'
+            })
+    
+    # Pattern 4: Lines starting with bullet points or dashes
+    lines = ing_text.split('\n')
+    for line in lines:
+        line = line.strip()
+        # Remove bullet points, dashes, asterisks
+        line = re.sub(r'^[-•*]\s*', '', line)
+        
+        if not line:
+            continue
+        
+        # Try to extract quantity and name
+        parts = line.split(maxsplit=1)
+        if len(parts) >= 2:
+            # Check if first part looks like quantity
+            if re.match(r'\d+', parts[0]) or parts[0] in ['a', 'an', 'half', 'quarter']:
+                qty_match = re.match(r'^([\d\.\s/]+(?:g|kg|ml|l|cup|cups|tsp|tbsp|piece|pieces)?)\s+(.+)$', line)
+                if qty_match:
+                    qty_str = qty_match.group(1).strip()
+                    name = qty_match.group(2).strip()
+                    
+                    # Remove trailing descriptions in parentheses
+                    name = re.sub(r'\s*\([^)]*\)$', '', name)
+                    name = re.sub(r'\s*,.*$', '', name)
+                    
+                    if is_valid_food_ingredient(name):
+                        # Check if not already added
+                        if not any(ing['name'] == name for ing in ingredients):
+                            ingredients.append({
+                                'name': name,
+                                'qty_str': qty_str
+                            })
+    
+    # Remove duplicates while preserving order
     seen = set()
-    unique = [ing for ing in ingredients if ing['name'] not in seen and not seen.add(ing['name'])]
+    unique = []
+    for ing in ingredients:
+        if ing['name'] not in seen:
+            seen.add(ing['name'])
+            unique.append(ing)
+    
     return unique
+
 
 def extract_steps(text):
     """Extract cooking steps from recipe"""
@@ -639,7 +858,8 @@ When giving recipes:
     low_items = [k for k, v in st.session_state.inventory.items() if v < 200]
     if low_items:
         base += f"\nUser has LOW stock of: {', '.join(low_items)}. Prefer recipes using little of these or suggest substitutes."
-   
+    if st.session_state.jain_mode:
+        base += "\nUser follows JAIN diet. NEVER suggest: onion, garlic, ginger, potato, carrot, radish, beetroot, or any root vegetables. Use hing (asafoetida) for flavor instead."
     return base
 
 def get_nutrition_prompt(servings):
@@ -682,7 +902,10 @@ with st.sidebar:
         value=st.session_state.allergies,
         help="I'll try to avoid these in suggestions!"
     )
-   
+    jain = st.toggle("Jain Mode (No root vegetables)", value=st.session_state.jain_mode)
+if jain != st.session_state.jain_mode:
+    st.session_state.jain_mode = jain
+    st.rerun()
     st.markdown("---")
     st.subheader("🎛️ Preferences")
    
@@ -1047,16 +1270,29 @@ with tab1:
     if st.session_state.show_cooking_check and not st.session_state.cooking_mode:
         st.markdown("---")
         st.subheader("🍳 Ingredient Check")
-        ingredients = extract_ingredients(st.session_state.last_recipe)
+        ingredients = extract_ingredients(st.session_state.last_recipe, jain_mode=st.session_state.jain_mode)
        
         if not ingredients:
             st.info("No ingredients could be detected in the last recipe.")
             st.session_state.show_cooking_check = False
             st.rerun()
+        
+        # ⭐ ADD THIS JAIN MODE WARNING HERE ⭐
+        if st.session_state.jain_mode:
+            non_jain = [ing['name'] for ing in ingredients if not is_jain_compatible(ing['name'])]
+            if non_jain:
+                st.warning(f"⚠️ **Jain Alert:** This recipe contains: {', '.join(non_jain)}")
+                st.info("**Suggested substitutes:**")
+                for item in non_jain:
+                    substitute = get_jain_substitute(item)
+                    st.write(f"• {item.capitalize()} → {substitute}")
+                st.markdown("---")
+        # ⭐ END OF JAIN WARNING ⭐
        
         if not st.session_state.ingredients_shown:
             st.session_state.ingredients_shown = True
             missing = []
+            # ... rest of the code continues ...
             for ing in ingredients:
                 name = ing['name'].lower()
                 found_key = None
