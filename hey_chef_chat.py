@@ -1837,4 +1837,5 @@ with tab_scan:
 
 # Footer
 st.markdown("---")
-st.caption("Hey Chef • Chat + Meal Planner + Grocery + Custom Recipes + Tried + Favourites • " + datetime.now().strftime("%Y-%m-%d"))
+
+st.caption("KitchenMate-ver1 by Manas " + datetime.now().strftime("%Y-%m-%d"))
