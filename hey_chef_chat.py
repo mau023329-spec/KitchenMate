@@ -890,8 +890,8 @@ Fiber: X g
 Be realistic using standard Indian/home-cooked food values. Do NOT give total for whole recipe — only per serving."""
 
 # ================= MAIN APP =================
-st.set_page_config(page_title="KitchenMate", layout="wide")
-st.title("KitchenMate - Smart AI Assistant")
+st.set_page_config(page_title="AnnaAI", layout="wide")
+st.title("AnnaAI - Smart AI Assistant")
 
 tab1, tab2, tab3, tab4, tab5, tab6, tab_scan = st.tabs([
     "💬 Chat", "📅 Meal Planner", "🛒 Grocery & Inventory",
@@ -979,7 +979,7 @@ with st.sidebar:
 
 # ────────────── CHAT TAB ──────────────
 with tab1:
-    st.subheader("💬 Chat with Hey Chef")
+    st.subheader("💬 Chat with AnnaAI")
    
     st.session_state.servings = st.number_input("Number of servings", min_value=1, max_value=10, value=st.session_state.servings, step=1)
    
@@ -1838,4 +1838,5 @@ with tab_scan:
 # Footer
 st.markdown("---")
 
-st.caption("KitchenMate-ver1 by Manas " + datetime.now().strftime("%Y-%m-%d"))
+st.caption("AnnaAI by Manas " + datetime.now().strftime("%Y-%m-%d"))
+
