@@ -18,6 +18,9 @@ import base64
 from openai import OpenAI
 import random
 
+st.set_page_config(page_title="AnnaAi - Your AI Kitchen Assistant", page_icon="🍽️")
+st.markdown('<meta name="google-site-verification" content="lRh2FiqkPDXkUqKxYVij5_moL7OkHjhydHjMlxUzgm8" />', unsafe_allow_html=True)
+
 # ================= CONFIG =================
 GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 OPENROUTER_API_KEY = st.secrets["OPENROUTER_API_KEY"]
@@ -889,9 +892,7 @@ Fiber: X g
 
 Be realistic using standard Indian/home-cooked food values. Do NOT give total for whole recipe — only per serving."""
 
-# ================= MAIN APP =================
-st.set_page_config(page_title="AnnaAI", layout="wide")
-st.title("AnnaAI - Smart AI Assistant")
+# ================= MAIN APP ===============
 
 tab1, tab2, tab3, tab4, tab5, tab6, tab_scan = st.tabs([
     "💬 Chat", "📅 Meal Planner", "🛒 Grocery & Inventory",
@@ -1839,4 +1840,5 @@ with tab_scan:
 st.markdown("---")
 
 st.caption("AnnaAI by Manas " + datetime.now().strftime("%Y-%m-%d"))
+
 
