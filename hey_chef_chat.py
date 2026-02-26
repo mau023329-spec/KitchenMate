@@ -18,8 +18,16 @@ import base64
 from openai import OpenAI
 import random
 
-st.set_page_config(page_title="AnnaAi - Your AI Kitchen Assistant", page_icon="🍽️")
-st.markdown('<meta name="google-site-verification" content="lRh2FiqkPDXkUqKxYVij5_moL7OkHjhydHjMlxUzgm8" />', unsafe_allow_html=True)
+# ================= PAGE CONFIG & SEO =================
+st.set_page_config(
+    page_title="AnnaAi - Your AI Kitchen Assistant",
+    page_icon="🍽️",
+    layout="wide"
+)
+
+st.markdown("""
+    <meta name="google-site-verification" content="lRh2FiqkPDXkUqKxYVij5_moL7OkHjhydHjMlxUzgm8" />
+""", unsafe_allow_html=True)
 
 # ================= CONFIG =================
 GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
@@ -1840,6 +1848,7 @@ with tab_scan:
 st.markdown("---")
 
 st.caption("AnnaAI by Manas " + datetime.now().strftime("%Y-%m-%d"))
+
 
 
 
