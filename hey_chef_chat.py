@@ -1847,7 +1847,8 @@ with tab_scan:
 # Footer
 st.markdown("---")
 
-st.caption("AnnaAI by Manas " + datetime.now().strftime("%Y-%m-%d"))
+st.caption("AnnaAI by Indian Instinct Studio" + datetime.now().strftime("%Y-%m-%d"))
+
 
 
 
